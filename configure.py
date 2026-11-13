@@ -123,6 +123,11 @@ parser.add_argument(
     action="store_false",
     help="disable progress calculation",
 )
+parser.add_argument(
+    "--augment",
+    action="store_true",
+    help="also generate augment.bin (needs external/augment and libclang)",
+)
 args = parser.parse_args()
 
 config = ProjectConfig()
@@ -2639,7 +2644,6 @@ config.libs = [
             Object(MatchingFor(), "Game/System/StorySequenceExecutor.cpp"),
             Object(MatchingFor(ALL_WII), "Game/System/SysConfigFile.cpp"),
             Object(MatchingFor(ALL_WII), "Game/System/UserFile.cpp"),
-            Object(MatchingFor(ALL_WII), "Game/System/BCSVInclude.s"),
             Object(MatchingFor(ALL_WII), "Game/System/ErrorMessageArchive.cpp"),
         ],
     ),
@@ -3817,6 +3821,54 @@ config.progress_categories = [
     ProgressCategory("trk", "MetroTRK"),
 ]
 config.progress_each_module = args.verbose
+
+if args.augment:
+    out = config.out_path()
+    ast_manifest = out / "augment_ast_manifest.json"
+    augment_bin = out / "augment.bin"
+    dol_elf = out / "main.elf"
+    augment_exclude_paths = ["/libs/", "/build/"] # path fragments phase1/2 should skip
+    excl = " ".join(f"--exclude-path {p}" for p in augment_exclude_paths)
+    run = "$python tools/augment_extract.py" # $python is defined in build.ninja
+
+    config.extra_clang_flags += ["-Wno-everything", "-ferror-limit=0"]
+
+    config.custom_build_rules = [
+        {
+            "name": "augment_phase1",
+            "command": (
+                f'{run} phase1 --compile-commands compile_commands.json '
+                f'--project-root "{Path.cwd().as_posix()}" --ast-out $out '
+                f'--pch {(out / "augment_pch.pch").as_posix()} {excl}'
+            ),
+            "description": "AUGMENT phase1 (AST walk)",
+            "pool": "console", # extract.py spawns its own parallel workers
+        },
+        {
+            "name": "augment_phase2",
+            "command": (
+                f"{run} phase2 --ast-manifest {ast_manifest.as_posix()} "
+                f"--binary $in --output $out --debug-format dwarf {excl}"
+            ),
+            "description": "AUGMENT phase2 (RVA extraction)",
+            "pool": "console",
+        },
+    ]
+    config.custom_build_steps = {
+        "post-build": [
+            {
+                "rule": "augment_phase1",
+                "inputs": "compile_commands.json",
+                "outputs": ast_manifest,
+            },
+            {
+                "rule": "augment_phase2",
+                "inputs": dol_elf,
+                "implicit": ast_manifest,
+                "outputs": augment_bin,
+            },
+        ],
+    }
 
 if args.mode == "configure":
     # Write build.ninja and objdiff.json
